@@ -4,69 +4,77 @@
 
 ## 1. Overview
 
-Predixion AI Research Agent is an AI-powered application that answers complex research questions through structured planning, web search, webpage retrieval, evidence filtering, and LLM-based synthesis.
+Predixion AI Research Agent is an AI-powered research application that answers complex research questions through structured planning, web search, webpage retrieval, evidence filtering, and LLM-powered synthesis.
 
-It generates structured research reports with source citations, confidence levels, limitations, and suggested next steps.
+Unlike a basic chatbot, the agent follows a research workflow to gather relevant information, evaluate retrieved evidence, validate citations, and generate structured research reports.
+
+Each report includes key findings, source references, confidence assessments, limitations, and suggested next steps.
 
 ## 2. Key Features
 
-- Research question understanding and planning.
-- DuckDuckGo-powered web search.
-- Automated webpage reading and content extraction.
-- Evidence filtering and relevance scoring.
-- Official-source classification.
-- Groq-powered research synthesis.
-- Citation URL validation.
-- Unsupported finding detection.
-- Confidence assessment and limitation reporting.
-- Structured JSON report generation and download.
+- **Research Planning:** Breaks research questions into structured research tasks.
+- **Web Search:** Retrieves relevant web results using DuckDuckGo.
+- **Webpage Extraction:** Reads webpages and extracts useful content.
+- **Evidence Filtering:** Uses relevance scoring and content-quality checks to filter retrieved information.
+- **Source Classification:** Identifies sources belonging to configured official domains.
+- **AI-Powered Synthesis:** Uses Groq to generate structured research findings.
+- **Citation Validation:** Checks that cited URLs belong to retrieved sources.
+- **Unsupported Finding Detection:** Flags findings that lack sufficient evidence.
+- **Confidence Assessment:** Provides heuristic confidence assessments.
+- **Structured Reports:** Generates research reports in JSON format.
+- **Report Export:** Allows users to download generated research results.
 
 ## 3. Technology Stack
 
 | Technology | Purpose |
 |---|---|
 | Python | Backend development |
-| Streamlit | User interface |
-| Groq API | LLM integration |
+| Streamlit | Interactive user interface |
+| Groq API | LLM-powered synthesis |
 | DuckDuckGo | Web search |
-| Requests | Webpage retrieval |
-| BeautifulSoup | HTML extraction |
+| Requests | HTTP requests and webpage retrieval |
+| BeautifulSoup | HTML parsing and content extraction |
 | Git & GitHub | Version control |
 
-## 4. Architecture
+## 4. System Architecture
+
+The agent follows a modular, single-agent architecture.
 
 ```text
-User Research Question
-         |
-         v
-    Streamlit UI
-         |
-         v
-    Research Agent
-         |
-         v
-       Planner
-         |
-         v
-     Tool Selection
-         |
-         v
-      Web Search
-         |
-         v
-   Webpage Reading
-         |
-         v
-  Evidence Filtering
-         |
-         v
-    Groq Synthesis
-         |
-         v
-  Report Validation
-         |
-         v
-   Research Report
+             User Research Question
+                       |
+                       v
+                  Streamlit UI
+                       |
+                       v
+                 Research Agent
+                       |
+                       v
+                     Planner
+                       |
+                       v
+                Tool Selection
+                       |
+                       v
+                   Web Search
+                       |
+                       v
+                Webpage Reading
+                       |
+                       v
+                Evidence Filtering
+                       |
+                       v
+                 Groq Synthesis
+                       |
+                       v
+                Report Validation
+                       |
+                       v
+                 Research Report
+                       |
+                       v
+                   JSON Export
 ```
 
 ## 5. Project Structure
@@ -74,15 +82,20 @@ User Research Question
 ```text
 predixion-research-agent/
 │
-├── app.py
-├── agent.py
-├── planner.py
-├── tools.py
-├── schemas.py
-├── config.py
-├── evaluator.py
+├── app.py                  # Streamlit application
+├── agent.py                # Main research agent
+├── planner.py              # Research planning
+├── tools.py                # Search, retrieval and evidence filtering
+├── schemas.py              # Report validation and evidence checks
+├── config.py               # Configuration and environment settings
+├── evaluator.py            # Evaluation utilities
+│
 ├── tests/
+│   └── test_agent.py        # Automated tests
+│
 ├── outputs/
+│   └── sample_report.md     # Sample research report
+│
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
@@ -91,45 +104,74 @@ predixion-research-agent/
 
 ## 6. Installation and Setup
 
-**Clone the repository:**
+### Prerequisites
+
+- Python 3.10 or later
+- Git
+- A Groq API key
+
+### Step 1: Clone the repository
 
 ```bash
 git clone https://github.com/YOUR-USERNAME/predixion-research-agent.git
 cd predixion-research-agent
 ```
 
-**Create and activate a virtual environment:**
+### Step 2: Create a virtual environment
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
 ```
 
-**Install dependencies:**
+Activate it on Windows:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+For macOS/Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+### Step 3: Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**Configure environment variables:**
+### Step 4: Configure environment variables
 
-Create a `.env` file:
+Create a `.env` file in the project root:
 
 ```env
 GROQ_API_KEY=your_groq_api_key
 ```
 
-Never commit your `.env` file or expose your API key.
+Replace the placeholder with your own Groq API key.
 
-## 7. Run the Application
+**Security:** Never commit `.env`, API keys, or other secrets to GitHub. The repository includes `.env.example` for configuration guidance.
+
+## 7. Running the Application
+
+Start the Streamlit application:
 
 ```bash
 python -m streamlit run app.py
 ```
 
-Open `http://localhost:8501` in your browser.
+Open the following address in your browser:
 
-## 8. Run Tests
+```text
+http://localhost:8501
+```
+
+Enter a research question to start the research workflow and generate a structured report.
+
+## 8. Running Tests
+
+Run the automated test suite:
 
 ```bash
 python -m unittest discover -s tests -v
@@ -141,68 +183,34 @@ The baseline test suite covers:
 - Retrieved URL validation.
 - Localhost URL rejection.
 - Unretrieved source rejection.
-- Missing citation handling.
+- Unsupported findings and missing citation handling.
 
 ## 9. Reliability and Evidence Validation
 
-The application incorporates:
+The application incorporates several safeguards to improve research reliability:
 
 - Public HTTP/HTTPS URL validation.
-- Private and localhost destination rejection.
-- Redirect validation and response-size limits.
-- Untrusted webpage content handling.
-- Citation URL validation.
-- Basic citation relevance checks.
-- Unsupported finding warnings.
+- Private IP and localhost destination rejection.
+- Redirect validation.
+- Request timeouts and response-size limits.
+- Webpage content extraction and filtering.
+- Relevance-based evidence scoring.
+- Retrieved-source citation validation.
+- Unsupported finding detection.
+- Prompt-injection awareness for untrusted webpage content.
 
-Evidence filtering uses lightweight heuristics. These checks reduce unsupported claims but do not guarantee factual correctness.
+Evidence filtering and citation checks use lightweight heuristics. They help reduce unsupported claims but do not guarantee factual correctness or prove that a source semantically supports a finding.
 
 ## 10. Design Decisions and Tradeoffs
 
-- **Single-agent architecture:** Keeps orchestration simple and maintainable.
-- **Groq:** Provides LLM-powered research synthesis.
-- **DuckDuckGo:** Enables web search without a separate search API key.
-- **Streamlit:** Provides a lightweight interactive interface.
-- **Custom validation:** Gives control over citations, evidence, and report structure.
-
-## 11. Known Limitations
-
-- Search coverage depends on external search results.
-- Some webpages may block automated retrieval.
-- Lexical relevance does not guarantee semantic support.
-- Official-domain classification does not guarantee accuracy.
-- Confidence scores are heuristic, not statistical probabilities.
-- Production-scale monitoring and cost tracking require further development.
-
-## 12. Future Improvements
-
-- Semantic evidence verification.
-- Improved source prioritization and diversity.
-- Better research coverage tracking.
-- Expanded automated evaluation.
-- Logging, latency, and API cost monitoring.
-- Improved Streamlit dashboard.
-- Caching and asynchronous tool execution.
-
-## 13. Evaluation Plan
-
-The agent will be evaluated using five research scenarios:
-
-1. PostgreSQL vs MongoDB comparison.
-2. Open-source vector database comparison.
-3. Indian B2B SaaS startup research.
-4. Multi-agent vs single-agent architecture research.
-5. Research with insufficient available evidence.
-
-Evaluation will consider retrieval quality, citation validity, evidence coverage, unsupported claims, report completeness, and failure handling.
-
-## 14. Final Deliverables
-
-- GitHub source-code repository.
-- Project documentation.
-- 3–5 minute demonstration video.
-- Evaluation report containing five test queries.
-- Two or three sample research reports.
+| Design Decision | Reasoning |
+|---|---|
+| Single-agent architecture | Keeps orchestration simple, modular, and maintainable. |
+| Groq API | Provides LLM-powered research synthesis. |
+| DuckDuckGo | Provides web search without requiring a separate search API key. |
+| Streamlit | Enables rapid development of an interactive research interface. |
+| Custom evidence validation | Provides greater control over citations and report quality. |
+| Structured JSON output | Makes research results easier to validate, export, and integrate. |
 
 ---
 
