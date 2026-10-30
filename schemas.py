@@ -1,7 +1,9 @@
 
 """Validate research reports and check citation relevance."""
 
+import ipaddress
 import re
+import socket
 from urllib.parse import urlparse
 
 
@@ -18,9 +20,63 @@ STOPWORDS = {
 }
 
 
+def _is_public_http_url(url):
+    """Reject localhost, private IPs, and non-public URLs."""
+
+    try:
+        parsed = urlparse(url)
+
+        if parsed.scheme not in ("http", "https"):
+            return False
+
+        hostname = parsed.hostname
+
+        if not hostname:
+            return False
+
+        hostname = hostname.lower()
+
+        if hostname == "localhost" or hostname.endswith(".localhost"):
+            return False
+
+        # Check literal IP addresses first.
+        try:
+            ip_addresses = [ipaddress.ip_address(hostname)]
+
+        except ValueError:
+            # Resolve domain names and check every returned IP.
+            try:
+                resolved = socket.getaddrinfo(
+                    hostname,
+                    None,
+                    type=socket.SOCK_STREAM,
+                )
+
+                ip_addresses = [
+                    ipaddress.ip_address(result[4][0])
+                    for result in resolved
+                ]
+
+            except (socket.gaierror, OSError, ValueError):
+                return False
+
+        if not ip_addresses:
+            return False
+
+        return all(address.is_global for address in ip_addresses)
+
+    except (ValueError, TypeError):
+        return False
+
+
 def _tokens(text):
     """Extract informative terms for a lightweight relevance check."""
-    words = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9+#.-]*", text.lower())
+
+    words = re.findall(
+        r"[a-zA-Z0-9][a-zA-Z0-9+#.-]*",
+        text.lower()
+    )
+
     return {
         word for word in words
         if len(word) > 2 and word not in STOPWORDS
@@ -33,6 +89,7 @@ def _source_supports_claim(claim, source):
 
     This is a heuristic, not proof that the source supports the claim.
     """
+
     source_text = " ".join((
         str(source.get("title", "")),
         str(source.get("search_snippet", "")),
@@ -56,13 +113,14 @@ def _source_supports_claim(claim, source):
 
 def validate_report(data: dict, evidence: list[dict]) -> dict:
     """Keep evidence-linked findings and flag unsupported claims."""
+
     if not isinstance(data, dict):
         raise ValueError("Model output was not a JSON object.")
 
     if not isinstance(evidence, list):
         evidence = []
 
-    # Index successfully retrieved pages with valid HTTP(S) URLs.
+    # Index successfully retrieved pages with valid public HTTP(S) URLs.
     evidence_by_url = {}
 
     for item in evidence:
@@ -80,12 +138,9 @@ def validate_report(data: dict, evidence: list[dict]) -> dict:
         ):
             continue
 
-        parsed_url = urlparse(url)
+        url = url.strip()
 
-        if (
-            parsed_url.scheme not in ("http", "https")
-            or not parsed_url.hostname
-        ):
+        if not _is_public_http_url(url):
             continue
 
         evidence_by_url[url] = item
@@ -111,47 +166,32 @@ def validate_report(data: dict, evidence: list[dict]) -> dict:
         ),
     }
 
-    # Accept only source URLs that exactly match retrieved evidence.
-    raw_sources = data.get("sources_used", [])
+    # Build sources_used from validated finding citations.
+    validated_source_urls = dict.fromkeys(
+        url
+        for finding in findings
+        for url in finding["source_urls"]
+        if url in evidence_by_url
+    )
 
-    if isinstance(raw_sources, list):
-        for source in raw_sources:
-            if not isinstance(source, dict):
-                continue
+    for url in validated_source_urls:
+        item = evidence_by_url[url]
 
-            url = source.get("url")
-
-            if not isinstance(url, str) or url not in evidence_by_url:
-                continue
-
-            item = evidence_by_url[url]
-
-            report["sources_used"].append({
-                "title": _string(
-                    item.get("title"),
-                    _string(source.get("title"), "Source"),
-                )[:300],
-                "url": url,
-                "domain": item.get("domain") or _domain(url),
-                "official_source": bool(
-                    item.get("official_source", False)
-                ),
-            })
-
-    # Remove duplicate sources while preserving their order.
-    unique_sources = []
-    seen_urls = set()
-
-    for source in report["sources_used"]:
-        if source["url"] not in seen_urls:
-            unique_sources.append(source)
-            seen_urls.add(source["url"])
-
-    report["sources_used"] = unique_sources
+        report["sources_used"].append({
+            "title": _string(
+                item.get("title"),
+                "Source"
+            )[:300],
+            "url": url,
+            "domain": item.get("domain") or _domain(url),
+            "official_source": bool(
+                item.get("official_source", False)
+            ),
+        })
 
     limitations = report["limitations_or_assumptions"]
 
-    # Explicitly flag findings rejected during validation.
+    # Flag findings rejected during validation.
     for claim, reason in unsupported[:5]:
         limitations.append(
             f"UNSUPPORTED FINDING: {claim[:180]} — {reason}"
@@ -176,7 +216,7 @@ def validate_report(data: dict, evidence: list[dict]) -> dict:
 
     if not report["sources_used"]:
         limitations.append(
-            "No source entries from the model matched retrieved evidence."
+            "No sources passed citation and evidence validation."
         )
 
     # Remove duplicate limitation messages.
@@ -203,7 +243,11 @@ def validate_report(data: dict, evidence: list[dict]) -> dict:
         "insufficient evidence",
     ))
 
-    if has_critical_gap or has_unsupported or has_material_uncertainty:
+    if (
+        has_critical_gap
+        or has_unsupported
+        or has_material_uncertainty
+    ):
         report["confidence"] = "Low"
 
     elif (
@@ -220,6 +264,7 @@ def validate_report(data: dict, evidence: list[dict]) -> dict:
 
 def _normalize_findings(value, evidence_by_url):
     """Validate findings and explain why rejected claims were excluded."""
+
     if not isinstance(value, list):
         return [], [(
             "Model findings",
@@ -230,6 +275,7 @@ def _normalize_findings(value, evidence_by_url):
     unsupported = []
 
     for item in value[:10]:
+
         if isinstance(item, str):
             claim = item.strip()
             raw_urls = []
@@ -238,6 +284,7 @@ def _normalize_findings(value, evidence_by_url):
             claim = str(
                 item.get("claim", item.get("finding", ""))
             ).strip()
+
             raw_urls = item.get("source_urls", [])
 
         else:
@@ -265,24 +312,24 @@ def _normalize_findings(value, evidence_by_url):
         # Accept only exact URLs matching retrieved evidence.
         valid_urls = list(dict.fromkeys(
             url for url in raw_urls
-            if isinstance(url, str) and url in evidence_by_url
+            if isinstance(url, str)
+            and url.strip() in evidence_by_url
         ))
 
         if not valid_urls:
             unsupported.append((
                 claim,
                 "finding excluded because no citation matched a "
-                "successfully retrieved page",
+                "successfully retrieved public page",
             ))
             continue
 
-        # Generic claims cannot be reliably assessed using word overlap.
-        # Keep their retrieved URLs, but do not treat them as proof.
         claim_terms = _tokens(claim)
         is_generic_claim = len(claim_terms) < 2
 
         if is_generic_claim:
             relevant_urls = valid_urls
+
         else:
             relevant_urls = [
                 url for url in valid_urls
@@ -317,6 +364,7 @@ def _normalize_findings(value, evidence_by_url):
 
 def _string(value, fallback):
     """Return a non-empty, bounded string."""
+
     if isinstance(value, str) and value.strip():
         return value.strip()[:4000]
 
@@ -325,6 +373,7 @@ def _string(value, fallback):
 
 def _string_list(value):
     """Normalize a list of strings."""
+
     if not isinstance(value, list):
         return []
 
@@ -342,4 +391,5 @@ def _string_list(value):
 
 def _domain(url):
     """Extract the hostname from a URL."""
+
     return (urlparse(url).hostname or "").lower()

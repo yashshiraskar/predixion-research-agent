@@ -28,6 +28,7 @@ def _client():
 def _is_transient(exc):
     """Identify errors that may succeed if retried."""
     message = str(exc).lower()
+
     return any(word in message for word in (
         "timeout", "temporarily", "rate limit", "429",
         "502", "503", "504", "connection",
@@ -56,6 +57,7 @@ def _chat_json(client, system_prompt, user_prompt):
 
             if not content or not content.strip():
                 usage = getattr(response, "usage", None)
+
                 raise ValueError(
                     "Model returned an empty response. "
                     f"Finish reason: {choice.finish_reason}; "
@@ -64,13 +66,16 @@ def _chat_json(client, system_prompt, user_prompt):
 
             try:
                 result = json.loads(content)
+
             except json.JSONDecodeError as exc:
                 raise ValueError(
                     f"Model returned invalid JSON: {exc}"
                 ) from exc
 
             if not isinstance(result, dict):
-                raise ValueError("Model response must be a JSON object.")
+                raise ValueError(
+                    "Model response must be a JSON object."
+                )
 
             return result
 
@@ -89,6 +94,42 @@ def _chat_json(client, system_prompt, user_prompt):
     ) from last_error
 
 
+def _prepare_evidence(evidence, max_chars=18000):
+    """
+    Prepare bounded evidence for the LLM without cutting JSON.
+
+    Preserve exact retrieved URLs so the model can cite them
+    without reconstructing or modifying them.
+    """
+    if not evidence:
+        return []
+
+    per_page_budget = max(
+        1000,
+        max_chars // len(evidence)
+    )
+
+    prepared = []
+
+    for page in evidence:
+        content = str(page.get("content", ""))
+
+        prepared.append({
+            "title": str(page.get("title", "")),
+            "url": str(page.get("url", "")),
+            "domain": str(page.get("domain", "")),
+            "official_source": bool(
+                page.get("official_source", False)
+            ),
+            "search_snippet": str(
+                page.get("search_snippet", "")
+            )[:800],
+            "content": content[:per_page_budget],
+        })
+
+    return prepared
+
+
 def run_research(question: str, max_sources: int = 5) -> dict:
     """Search the web, read pages, and produce a validated report."""
 
@@ -98,9 +139,12 @@ def run_research(question: str, max_sources: int = 5) -> dict:
     question = question.strip()
 
     if len(question) > 2000:
-        raise ValueError("Please keep the question under 2,000 characters.")
+        raise ValueError(
+            "Please keep the question under 2,000 characters."
+        )
 
     max_sources = max(1, min(int(max_sources), 8))
+
     client = _client()
     plan = create_plan(client, question)
 
@@ -122,9 +166,18 @@ def run_research(question: str, max_sources: int = 5) -> dict:
 
     def read_result(item, label="Could not read"):
         """Read one result and record a useful, bounded error."""
+
+        if not isinstance(item, dict):
+            return False
+
         url = item.get("url", "")
 
-        if not url or url in seen_urls:
+        if not isinstance(url, str) or not url.strip():
+            return False
+
+        url = url.strip()
+
+        if url in seen_urls:
             return False
 
         seen_urls.add(url)
@@ -138,11 +191,24 @@ def run_research(question: str, max_sources: int = 5) -> dict:
                 or not page["content"].strip()
             ):
                 read_errors.append(
-                    f"{label}: {url} (page returned no readable text)"
+                    f"{label}: {url} "
+                    "(page returned no readable text)"
                 )
                 return False
 
+            # Preserve the URL returned by the webpage reader.
+            # This may be the final URL after a validated redirect.
+            retrieved_url = page.get("url") or url
+
+            if not isinstance(retrieved_url, str):
+                read_errors.append(
+                    f"{label}: {url} (invalid retrieved URL)"
+                )
+                return False
+
+            page["url"] = retrieved_url.strip()
             page["search_snippet"] = item.get("snippet", "")
+
             evidence.append(page)
 
             if "read_webpage" not in tools_used:
@@ -181,6 +247,9 @@ def run_research(question: str, max_sources: int = 5) -> dict:
             )
 
             for item in fallback_results:
+                if not isinstance(item, dict):
+                    continue
+
                 fallback_url = item.get("url", "")
 
                 if (
@@ -189,7 +258,10 @@ def run_research(question: str, max_sources: int = 5) -> dict:
                 ):
                     continue
 
-                if read_result(item, label="Fallback page failed"):
+                if read_result(
+                    item,
+                    label="Fallback page failed"
+                ):
                     break
 
         except Exception as exc:
@@ -204,11 +276,14 @@ def run_research(question: str, max_sources: int = 5) -> dict:
             "Check the retrieval issues or try again later."
         )
 
-    # Prepare bounded evidence for the model.
+    # Prepare a valid, bounded JSON evidence payload.
+    model_evidence = _prepare_evidence(evidence)
+
     evidence_text = json.dumps(
-        evidence,
+        model_evidence,
         ensure_ascii=False,
-    )[:18000]
+        indent=2,
+    )
 
     system_prompt = """
 You are a careful research analyst producing an evidence-based report.
@@ -221,51 +296,61 @@ SECURITY
 EVIDENCE RULES
 - Use only the supplied retrieved pages for factual claims.
 - Do not invent facts, dates, prices, statistics, benchmarks, or sources.
-- Every key finding must be an object with:
-  - claim: a specific, factual statement
-  - source_urls: an array of exact URL strings from the supplied evidence.
-- Every finding must cite at least one page whose content directly supports
-  the claim. A page merely mentioning the same broad topic is insufficient.
-- Cite all pages that materially support a finding. Do not add irrelevant
-  citations just to increase the number of sources.
-- Never cite a search result unless its page was successfully retrieved
-  and included in the supplied evidence.
+- Every key finding must be an object containing:
+  - claim: a specific factual statement.
+  - source_urls: an array of exact URL strings copied from the evidence.
+- Copy source URLs EXACTLY as provided in the evidence.
+- Do not reconstruct, shorten, normalize, or modify URLs.
+- Every finding must cite at least one page whose content directly
+  supports the claim.
+- A page merely mentioning the same broad topic is insufficient.
+- Cite all pages that materially support a finding.
+- Do not add irrelevant citations just to increase the number of sources.
+- Never cite a search result unless its page was successfully retrieved.
 - Never present unsupported claims as established facts.
-- If a requested topic lacks sufficient evidence, explicitly disclose the gap
-  in limitations_or_assumptions and suggest how to verify it.
-- If sources disagree, explain the disagreement and cite the relevant
-  sources on both sides.
+- If a requested topic lacks sufficient evidence, disclose the gap.
+- If sources disagree, explain the disagreement and cite both sides.
 - Distinguish official documentation from secondary commentary.
 - Never claim that a citation was independently verified if it was not.
 - Do not treat the presence of a URL as proof that it supports a claim.
 
 REPORT REQUIREMENTS
-- Answer the user's full question, including its distinct subtopics.
-- Keep the short_answer concise and consistent with the key findings.
-- Make every finding traceable to the exact supplied source URLs.
+- Answer the user's full question, including distinct subtopics.
+- Keep short_answer concise and consistent with key_findings.
+- Make every finding traceable to exact supplied source URLs.
 - Do not invent sources or cite URLs absent from the evidence.
-- Use confidence cautiously. More citations do not automatically mean
-  greater confidence.
-- If a finding cannot be supported, omit it from key_findings and explain
-  the exclusion in limitations_or_assumptions.
-- Do not silently omit requested topics that lack evidence. Disclose them.
+- Use confidence cautiously.
+- If a finding cannot be supported, omit it and explain why.
+- Do not silently omit requested topics that lack evidence.
 - Include limitations_or_assumptions and suggested_next_steps as arrays.
-- Return only a valid JSON object with these keys:
-  short_answer
-  key_findings
-  sources_used (objects with title and url)
-  confidence (High, Medium, or Low)
-  limitations_or_assumptions (array of strings)
-  suggested_next_steps (array of strings)
+
+SOURCES REQUIREMENT
+- sources_used must contain objects with:
+  - title
+  - url
+- Include only sources that support at least one key finding.
+- Copy their exact URLs from the supplied evidence.
+- Do not leave sources_used empty if valid sources support findings.
+
+Return only a valid JSON object with these keys:
+- short_answer
+- key_findings
+- sources_used
+- confidence (High, Medium, or Low)
+- limitations_or_assumptions
+- suggested_next_steps
 """
 
     user_prompt = (
         f"Question:\n{question}\n\n"
-        f"Research plan:\n{json.dumps(plan)}\n\n"
+        f"Research plan:\n{json.dumps(plan, ensure_ascii=False)}\n\n"
         f"Pages that failed to read (do not cite these):\n"
-        f"{json.dumps(read_errors)}\n\n"
-        f"Evidence from successfully read pages:\n{evidence_text}\n\n"
-        "Write a source-linked report. Do not invent a date checked."
+        f"{json.dumps(read_errors, ensure_ascii=False)}\n\n"
+        "IMPORTANT: The following JSON contains the exact URLs "
+        "that you are allowed to cite. Copy them exactly.\n\n"
+        f"Retrieved evidence:\n{evidence_text}\n\n"
+        "Write a source-linked research report. "
+        "Do not invent facts or sources."
     )
 
     raw_report = _chat_json(
@@ -274,7 +359,12 @@ REPORT REQUIREMENTS
         user_prompt,
     )
 
-    report = validate_report(raw_report, evidence)
+    # Validate all findings against the original retrieved evidence,
+    # not just the shortened evidence sent to the model.
+    report = validate_report(
+        raw_report,
+        evidence,
+    )
 
     return {
         "question": question,
