@@ -16,7 +16,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-USER_AGENT = "PredixionResearchAgent/0.3"
+USER_AGENT = "PredixionResearchAgent/0.4"
 
 MAX_SEARCH_RESULTS = 8
 MAX_PAGE_BYTES = 1_000_000
@@ -37,10 +37,12 @@ STOPWORDS = {
 }
 
 
-# Domains used for official-source classification.
-# This is a classification aid, not a guarantee of reliability.
+# Official product and documentation domains.
+# This is a heuristic classification, not a guarantee of reliability.
 OFFICIAL_DOMAINS = {
+    # General developer platforms and cloud providers
     "python.org",
+    "docs.python.org",
     "firebase.google.com",
     "cloud.google.com",
     "mongodb.com",
@@ -50,8 +52,45 @@ OFFICIAL_DOMAINS = {
     "aws.amazon.com",
     "docs.aws.amazon.com",
     "learn.microsoft.com",
-    "github.com",
     "groq.com",
+    "openai.com",
+
+    # Vector databases
+    "qdrant.tech",
+    "qdrant.io",
+    "milvus.io",
+    "weaviate.io",
+    "pinecone.io",
+    "trychroma.com",
+
+    # RAG and data infrastructure
+    "langchain.com",
+    "llamaindex.ai",
+    "redis.io",
+    "elastic.co",
+    "opensearch.org",
+    "datastax.com",
+    "cockroachlabs.com",
+}
+
+
+# GitHub is not universally official.
+# Only repositories belonging to known project organizations
+# receive the official repository classification.
+OFFICIAL_GITHUB_ORGS = {
+    "qdrant",
+    "milvus-io",
+    "weaviate",
+    "pinecone-io",
+    "chroma-core",
+    "langchain-ai",
+    "run-llama",
+    "redis",
+    "elastic",
+    "opensearch-project",
+    "postgres",
+    "mongodb",
+    "google",
 }
 
 
@@ -97,8 +136,20 @@ def _normalize_url(url):
 
 
 def _is_official(url):
-    """Classify URLs belonging to explicitly listed official domains."""
+    """Classify known official documentation and project websites."""
+    parsed = urlparse(url)
     host = _domain(url)
+
+    if host == "github.com":
+        parts = [
+            part for part in parsed.path.split("/")
+            if part
+        ]
+
+        return bool(
+            parts
+            and parts[0].lower() in OFFICIAL_GITHUB_ORGS
+        )
 
     return any(
         host == domain.removeprefix("www.")
@@ -107,31 +158,91 @@ def _is_official(url):
     )
 
 
+def _source_priority(url):
+    """
+    Return source authority tier.
+
+    3 = Official documentation or vendor website
+    2 = Recognized official project repository
+    1 = Other sources
+    """
+    parsed = urlparse(url)
+    host = _domain(url)
+
+    if host == "github.com":
+        parts = [
+            part for part in parsed.path.split("/")
+            if part
+        ]
+
+        if (
+            parts
+            and parts[0].lower() in OFFICIAL_GITHUB_ORGS
+        ):
+            return 2
+
+        return 1
+
+    if _is_official(url):
+        return 3
+
+    return 1
+
+
+def _ranking_score(relevance, quality, url):
+    """
+    Combine relevance, authority, and metadata quality.
+
+    Relevance remains the largest factor.
+    Authority helps rank close matches.
+    """
+    authority = {
+        1: 0.0,
+        2: 0.75,
+        3: 1.0,
+    }[_source_priority(url)]
+
+    return round(
+        (0.70 * relevance)
+        + (0.20 * authority)
+        + (0.10 * quality),
+        3,
+    )
+
+
 def _validate_public_http_url(url):
     """Reject non-HTTP URLs and non-public destinations."""
     parsed = urlparse(url)
 
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError("Only HTTP and HTTPS URLs are allowed.")
+        raise ValueError(
+            "Only HTTP and HTTPS URLs are allowed."
+        )
 
     if parsed.username or parsed.password:
-        raise ValueError("URLs containing credentials are not allowed.")
+        raise ValueError(
+            "URLs containing credentials are not allowed."
+        )
 
     host = parsed.hostname.lower()
 
     if host == "localhost" or host.endswith(
         (".localhost", ".local", ".internal")
     ):
-        raise ValueError("Local network URLs are not allowed.")
+        raise ValueError(
+            "Local network URLs are not allowed."
+        )
 
     try:
         addresses = {ip_address(host)}
+
     except ValueError:
         try:
             addresses = {
                 ip_address(item[4][0])
                 for item in socket.getaddrinfo(host, None)
             }
+
         except OSError as exc:
             raise ValueError(
                 "Could not validate the URL host."
@@ -140,7 +251,9 @@ def _validate_public_http_url(url):
     if not addresses or not all(
         address.is_global for address in addresses
     ):
-        raise ValueError("Private or non-public URLs are not allowed.")
+        raise ValueError(
+            "Private or non-public URLs are not allowed."
+        )
 
 
 def _tokens(text):
@@ -160,7 +273,7 @@ def _relevance_score(query, text):
     """
     Estimate query relevance using informative term overlap.
 
-    This is a lightweight heuristic, not semantic verification.
+    This is a heuristic, not semantic verification.
     """
     query_terms = _tokens(query)
     content_terms = _tokens(text)
@@ -170,14 +283,17 @@ def _relevance_score(query, text):
 
     matched = query_terms & content_terms
 
-    return round(len(matched) / len(query_terms), 3)
+    return round(
+        len(matched) / len(query_terms),
+        3,
+    )
 
 
 def _source_quality_score(title, snippet, official_source=False):
     """
-    Estimate basic source quality from available search metadata.
+    Estimate basic source quality from search metadata.
 
-    Official status is a small positive signal, not proof of accuracy.
+    Official status is a positive signal, not proof of accuracy.
     """
     score = 0.0
 
@@ -186,6 +302,7 @@ def _source_quality_score(title, snippet, official_source=False):
 
     if snippet and len(snippet.strip()) >= 80:
         score += 0.45
+
     elif snippet and len(snippet.strip()) >= 30:
         score += 0.25
 
@@ -196,7 +313,7 @@ def _source_quality_score(title, snippet, official_source=False):
 
 
 def _content_quality(content):
-    """Check whether a retrieved page contains enough useful text."""
+    """Check whether a retrieved page contains useful text."""
     text = str(content or "").strip()
     words = _tokens(text)
 
@@ -224,17 +341,14 @@ def _content_quality(content):
 
 def filter_evidence(question, evidence, min_relevance=0.10):
     """
-    Filter retrieved evidence by query relevance and content quality.
+    Filter retrieved evidence by relevance and content quality.
 
-    Returns:
-        accepted: Evidence suitable for further synthesis.
-        rejected: Evidence with explicit rejection reasons.
-
-    The scoring is heuristic and should not be interpreted as
-    proof that a source supports a particular factual claim.
+    Returns accepted and rejected evidence separately.
     """
     if not isinstance(question, str) or not question.strip():
-        raise ValueError("Research question cannot be empty.")
+        raise ValueError(
+            "Research question cannot be empty."
+        )
 
     if not isinstance(evidence, list):
         return [], []
@@ -244,6 +358,7 @@ def filter_evidence(question, evidence, min_relevance=0.10):
     seen_urls = set()
 
     for item in evidence:
+
         if not isinstance(item, dict):
             rejected.append({
                 "title": "Unknown source",
@@ -254,7 +369,12 @@ def filter_evidence(question, evidence, min_relevance=0.10):
         url = item.get("url", "")
         title = str(item.get("title", "Untitled"))
         content = str(item.get("content", ""))
-        snippet = str(item.get("search_snippet", item.get("snippet", "")))
+        snippet = str(
+            item.get(
+                "search_snippet",
+                item.get("snippet", ""),
+            )
+        )
 
         if not isinstance(url, str) or not url.strip():
             rejected.append({
@@ -265,6 +385,7 @@ def filter_evidence(question, evidence, min_relevance=0.10):
 
         try:
             _validate_public_http_url(url)
+
         except (ValueError, TypeError):
             rejected.append({
                 "title": title,
@@ -299,7 +420,9 @@ def filter_evidence(question, evidence, min_relevance=0.10):
             rejected.append({
                 "title": title,
                 "url": url,
-                "reason": "; ".join(quality["quality_flags"]),
+                "reason": "; ".join(
+                    quality["quality_flags"]
+                ),
             })
             continue
 
@@ -313,12 +436,18 @@ def filter_evidence(question, evidence, min_relevance=0.10):
                 "title": title,
                 "url": url,
                 "relevance_score": relevance,
-                "reason": "Page does not sufficiently match the research question",
+                "reason": (
+                    "Page does not sufficiently match "
+                    "the research question"
+                ),
             })
             continue
 
         official = bool(
-            item.get("official_source", _is_official(url))
+            item.get(
+                "official_source",
+                _is_official(url),
+            )
         )
 
         source_quality = _source_quality_score(
@@ -331,8 +460,14 @@ def filter_evidence(question, evidence, min_relevance=0.10):
 
         accepted_item.update({
             "official_source": official,
+            "source_priority": _source_priority(url),
             "relevance_score": relevance,
             "quality_score": source_quality,
+            "ranking_score": _ranking_score(
+                relevance,
+                source_quality,
+                url,
+            ),
             "content_length": quality["content_length"],
             "word_count": quality["word_count"],
             "quality_flags": quality["quality_flags"],
@@ -341,13 +476,10 @@ def filter_evidence(question, evidence, min_relevance=0.10):
 
         accepted.append(accepted_item)
 
-    # Rank relevant evidence first, then use source quality as a
-    # secondary signal. Do not automatically discard secondary sources.
+    # Rank by combined relevance, authority, and quality.
+    # Secondary sources remain available for useful comparisons.
     accepted.sort(
-        key=lambda item: (
-            item["relevance_score"],
-            item["quality_score"],
-        ),
+        key=lambda item: item["ranking_score"],
         reverse=True,
     )
 
@@ -357,9 +489,14 @@ def filter_evidence(question, evidence, min_relevance=0.10):
 def web_search(query, max_results=5):
     """Tool 1: Search the web using DuckDuckGo."""
     if not isinstance(query, str) or not query.strip():
-        raise ValueError("Search query cannot be empty.")
+        raise ValueError(
+            "Search query cannot be empty."
+        )
 
-    max_results = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
+    max_results = max(
+        1,
+        min(int(max_results), MAX_SEARCH_RESULTS),
+    )
 
     try:
         from ddgs import DDGS
@@ -382,6 +519,7 @@ def web_search(query, max_results=5):
     seen_urls = set()
 
     for item in raw_results:
+
         url = item.get("href") or item.get("url")
 
         if not url:
@@ -389,6 +527,7 @@ def web_search(query, max_results=5):
 
         try:
             _validate_public_http_url(url)
+
         except (ValueError, TypeError):
             continue
 
@@ -399,8 +538,14 @@ def web_search(query, max_results=5):
 
         seen_urls.add(normalized_url)
 
-        title = str(item.get("title", "Untitled"))[:300]
-        snippet = str(item.get("body", ""))[:1000]
+        title = str(
+            item.get("title", "Untitled")
+        )[:300]
+
+        snippet = str(
+            item.get("body", "")
+        )[:1000]
+
         official = _is_official(url)
 
         relevance = _relevance_score(
@@ -414,7 +559,6 @@ def web_search(query, max_results=5):
             official,
         )
 
-        # Very weak matches are excluded from the search output.
         if relevance < 0.10:
             continue
 
@@ -424,15 +568,18 @@ def web_search(query, max_results=5):
             "snippet": snippet,
             "domain": _domain(url),
             "official_source": official,
+            "source_priority": _source_priority(url),
             "relevance_score": relevance,
             "quality_score": quality,
+            "ranking_score": _ranking_score(
+                relevance,
+                quality,
+                url,
+            ),
         })
 
     results.sort(
-        key=lambda item: (
-            item["relevance_score"],
-            item["quality_score"],
-        ),
+        key=lambda item: item["ranking_score"],
         reverse=True,
     )
 
@@ -456,7 +603,11 @@ def read_webpage(url):
 
         redirects = 0
 
-        while response.is_redirect or response.is_permanent_redirect:
+        # Validate every redirect destination.
+        while (
+            response.is_redirect
+            or response.is_permanent_redirect
+        ):
             if redirects >= 4:
                 raise ValueError("Too many redirects.")
 
@@ -468,7 +619,9 @@ def read_webpage(url):
                 )
 
             target = urljoin(response.url, location)
+
             _validate_public_http_url(target)
+
             response.close()
 
             response = requests.get(
@@ -484,7 +637,8 @@ def read_webpage(url):
         response.raise_for_status()
 
         content_type = response.headers.get(
-            "content-type", ""
+            "content-type",
+            "",
         ).lower()
 
         if not any(
@@ -499,7 +653,9 @@ def read_webpage(url):
         chunks = []
         total_size = 0
 
-        for chunk in response.iter_content(chunk_size=8192):
+        for chunk in response.iter_content(
+            chunk_size=8192
+        ):
             if not chunk:
                 continue
 
@@ -517,19 +673,27 @@ def read_webpage(url):
 
         raw_html = b"".join(chunks)
 
-        # Parse downloaded bytes directly to avoid rereading
-        # an already-consumed HTTP response stream.
-        soup = BeautifulSoup(raw_html, "html.parser")
+        soup = BeautifulSoup(
+            raw_html,
+            "html.parser",
+        )
 
         for tag in soup([
-            "script", "style", "nav", "footer",
-            "header", "noscript", "svg", "form",
+            "script",
+            "style",
+            "nav",
+            "footer",
+            "header",
+            "noscript",
+            "svg",
+            "form",
         ]):
             tag.decompose()
 
         title = (
             soup.title.get_text(" ", strip=True)
-            if soup.title else response.url
+            if soup.title
+            else response.url
         )
 
         content = " ".join(
@@ -545,6 +709,7 @@ def read_webpage(url):
             "content": content[:7000],
             "domain": _domain(response.url),
             "official_source": official,
+            "source_priority": _source_priority(response.url),
             "content_length": quality["content_length"],
             "word_count": quality["word_count"],
             "quality_flags": quality["quality_flags"],
