@@ -29,6 +29,9 @@ def _is_public_http_url(url):
         if parsed.scheme not in ("http", "https"):
             return False
 
+        if parsed.username or parsed.password:
+            return False
+
         hostname = parsed.hostname
 
         if not hostname:
@@ -36,7 +39,10 @@ def _is_public_http_url(url):
 
         hostname = hostname.lower()
 
-        if hostname == "localhost" or hostname.endswith(".localhost"):
+        if (
+            hostname == "localhost"
+            or hostname.endswith((".localhost", ".local", ".internal"))
+        ):
             return False
 
         # Check literal IP addresses first.
@@ -74,7 +80,7 @@ def _tokens(text):
 
     words = re.findall(
         r"[a-zA-Z0-9][a-zA-Z0-9+#.-]*",
-        text.lower()
+        text.lower(),
     )
 
     return {
@@ -87,7 +93,8 @@ def _source_supports_claim(claim, source):
     """
     Check basic lexical relevance to a retrieved source.
 
-    This is a heuristic, not proof that the source supports the claim.
+    This keyword-overlap heuristic is not semantic verification or proof
+    that the source logically entails the claim.
     """
 
     source_text = " ".join((
@@ -104,11 +111,9 @@ def _source_supports_claim(claim, source):
 
     matched = claim_terms & source_terms
     minimum_matches = 1 if len(claim_terms) <= 3 else 2
+    overlap = len(matched) / len(claim_terms)
 
-    return (
-        len(matched) >= minimum_matches
-        and len(matched) / len(claim_terms) >= 0.15
-    )
+    return len(matched) >= minimum_matches and overlap >= 0.20
 
 
 def validate_report(data: dict, evidence: list[dict]) -> dict:
@@ -166,7 +171,7 @@ def validate_report(data: dict, evidence: list[dict]) -> dict:
         ),
     }
 
-    # Build sources_used from validated finding citations.
+    # Build sources_used only from validated finding citations.
     validated_source_urls = dict.fromkeys(
         url
         for finding in findings
@@ -180,7 +185,7 @@ def validate_report(data: dict, evidence: list[dict]) -> dict:
         report["sources_used"].append({
             "title": _string(
                 item.get("title"),
-                "Source"
+                "Source",
             )[:300],
             "url": url,
             "domain": item.get("domain") or _domain(url),
@@ -281,10 +286,8 @@ def _normalize_findings(value, evidence_by_url):
             raw_urls = []
 
         elif isinstance(item, dict):
-            claim = str(
-                item.get("claim", item.get("finding", ""))
-            ).strip()
-
+            raw_claim = item.get("claim", item.get("finding", ""))
+            claim = raw_claim.strip() if isinstance(raw_claim, str) else ""
             raw_urls = item.get("source_urls", [])
 
         else:
@@ -324,20 +327,14 @@ def _normalize_findings(value, evidence_by_url):
             ))
             continue
 
-        claim_terms = _tokens(claim)
-        is_generic_claim = len(claim_terms) < 2
-
-        if is_generic_claim:
-            relevant_urls = valid_urls
-
-        else:
-            relevant_urls = [
-                url for url in valid_urls
-                if _source_supports_claim(
-                    claim,
-                    evidence_by_url[url],
-                )
-            ]
+        # Even short claims must have meaningful overlap with the page.
+        relevant_urls = [
+            url for url in valid_urls
+            if _source_supports_claim(
+                claim,
+                evidence_by_url[url],
+            )
+        ]
 
         if not relevant_urls:
             unsupported.append((
