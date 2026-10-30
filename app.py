@@ -230,6 +230,7 @@ if st.button(
         else:
             st.write("No next steps were suggested.")
 
+        
         # Raw evidence
         with st.expander("Evidence collected"):
             evidence = result.get("evidence", [])
@@ -250,9 +251,11 @@ if st.button(
                 if source.get("official_source", False):
                     st.caption("Classified as an official source")
 
-                st.write(content[:2200] or "No readable page text.")
+                # Display webpage text as plain text, not Markdown.
+                st.text(content[:2200] or "No readable page text.")
 
                 st.divider()
+
 
         # Structured report
         with st.expander("Raw structured report"):

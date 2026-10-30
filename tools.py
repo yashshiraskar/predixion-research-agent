@@ -406,6 +406,20 @@ def filter_evidence(question, evidence, min_relevance=0.10):
 
         seen_urls.add(normalized_url)
 
+        # Reject freelancer listings even if they were supplied directly.
+        if _looks_like_freelance_listing(
+            title=title,
+            snippet=snippet,
+            content=content,
+            url=url,
+        ):
+            rejected.append({
+                "title": title,
+                "url": url,
+                "reason": "Freelancer advertisement or service listing",
+            })
+            continue
+
         if not content.strip():
             rejected.append({
                 "title": title,
@@ -486,6 +500,70 @@ def filter_evidence(question, evidence, min_relevance=0.10):
     return accepted, rejected
 
 
+def _looks_like_freelance_listing(
+    title="",
+    snippet="",
+    content="",
+    url="",
+):
+    """
+    Detect marketplace gigs and service advertisements.
+
+    Uses marketplace domains and characteristic listing phrases.
+    """
+    text = f"{title} {snippet} {content}".lower()
+    host = _domain(url) if url else ""
+
+    marketplace_domains = {
+        "fiverr.com",
+        "upwork.com",
+        "freelancer.com",
+        "peopleperhour.com",
+        "guru.com",
+        "workana.com",
+        "truelancer.com",
+        "contra.com",
+        "khamsat.com",
+        "mostaql.com",
+    }
+
+    if any(
+        host == domain or host.endswith("." + domain)
+        for domain in marketplace_domains
+    ):
+        return True
+
+    strong_phrases = (
+        "what you get with this offer",
+        "what the freelancer needs to start the work",
+        "what the freelancer needs to start work",
+        "amount of days required to complete work",
+        "contact the seller",
+        "purchase this gig",
+        "place an order for this service",
+        "hire me for this project",
+        "buy this service",
+    )
+
+    if any(phrase in text for phrase in strong_phrases):
+        return True
+
+    generic_signals = (
+        "freelancer",
+        "service offer",
+        "delivery in",
+        "starting at",
+        "quantity",
+        "show more details",
+        "average time for the freelancer to first reply",
+        "days required to complete",
+    )
+
+    return sum(
+        phrase in text for phrase in generic_signals
+    ) >= 3
+
+
 def web_search(query, max_results=5):
     """Tool 1: Search the web using DuckDuckGo."""
     if not isinstance(query, str) or not query.strip():
@@ -545,6 +623,14 @@ def web_search(query, max_results=5):
         snippet = str(
             item.get("body", "")
         )[:1000]
+
+        # Reject freelancer listings before ranking search results.
+        if _looks_like_freelance_listing(
+            title=title,
+            snippet=snippet,
+            url=url,
+        ):
+            continue
 
         official = _is_official(url)
 
@@ -699,6 +785,17 @@ def read_webpage(url):
         content = " ".join(
             soup.get_text(" ", strip=True).split()
         )
+
+        # Recheck the actual page because search snippets can be incomplete.
+        if _looks_like_freelance_listing(
+            title=title,
+            content=content,
+            url=response.url,
+        ):
+            raise ValueError(
+                "Freelancer advertisement or service listing "
+                "rejected as a research source."
+            )
 
         quality = _content_quality(content)
         official = _is_official(response.url)
